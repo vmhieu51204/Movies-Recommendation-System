@@ -1,0 +1,4 @@
+# Project Configuration
+# Generated automatically by config.py
+
+path=C:\Users\hungn\Documents\GitHub\Movies-Recommendation-System\data
