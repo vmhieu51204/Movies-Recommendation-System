@@ -81,31 +81,30 @@ def select_user(a, b):
 def round_to_half(x):
     return round(x * 2) / 2
 
-def matrix_factorization(n_factors = 200, n_epochs = 10, lr_all = 0.005, reg_all = 0.02):
+def matrix_factorization(n_factors = 200, n_epochs = 60, lr_all = 0.02, reg_all = 0.02):
     from surprise import Dataset, Reader
     from surprise.model_selection import train_test_split
     from surprise import Reader, Dataset, SVD, accuracy
+    global ratings
+    global movies
     
     reader = Reader(rating_scale=(0.5, 5))
     data = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], reader)
+    best_model = SVD(n_factors = 200, n_epochs = 60, lr_all = 0.02, reg_all = 0.02)
     trainset, testset = train_test_split(data, test_size=0.2)
+    best_model.fit(trainset)
+    predictions = best_model.test(testset)
+    def round_to_half(x):
+        return round(x * 2) / 2
 
-    model = SVD(n_factors = n_factors, n_epochs = n_epochs, lr_all = lr_all, reg_all = reg_all)
-    model.fit(trainset)
-    predictions = model.test(testset)
     rounded_predictions = [
         pred._replace(est=np.clip(round_to_half(pred.est), 0.5, 5.0))
         for pred in predictions
     ]
-    rmse = accuracy.rmse(predictions)
-    mse = accuracy.mse(predictions)
-    mae = accuracy.mae(rounded_predictions)
-    print(f"Test RMSE: {rmse:.4f}")
-    print(f"Test MSE: {mse:.4f}")
-    print(f"Test MAE: {mae:.4f}")
-    
-    with open(os.path.join(model_path, 'matrix_factorization_model.pkl'), 'wb') as f:
-        pickle.dump(model, f)
+    print("MSE: ", predictions)
+    print("Rounded MSE: ",accuracy.mse(rounded_predictions))
+
+    pickle.dump(best_model, open('matrix_fac.pickle', "wb"))
 
 def linear(a,b):
     selected_user, X_train, X_test, y_train, y_test = select_user(a,b)
