@@ -19,6 +19,7 @@ from sklearn.metrics.pairwise import linear_kernel, cosine_similarity
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression, Ridge, SGDRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, root_mean_squared_error
+from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
 
 import argparse
 
@@ -39,47 +40,52 @@ model_name = args.model
 ratings = pd.read_csv(os.path.join(path, 'p_ratings.csv'))
 movies = pd.read_csv(os.path.join(path, 'p_movies_metadata.csv'))
 
-tfidf_vectorizer = TfidfVectorizer(min_df=3, max_df=0.95, stop_words='english', max_features=5000)
-tfidf_matrix = tfidf_vectorizer.fit_transform(movies['description'])
-
-tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), 
-                       columns=tfidf_vectorizer.get_feature_names_out(),
-                       index=movies.index)
-
-print(f"Tf-idf matrix shape: ", tfidf_matrix.shape)
-
-def select_user(a, b):
-    user_ratings_count = ratings.groupby('userId').size()
-    eligible_users = user_ratings_count[(user_ratings_count >= a) & (user_ratings_count <= b)].index.tolist()
-    if not eligible_users:
-        raise ValueError(f"No users found with ratings count in range [{a}, {b}]")
-    #selected_user = eligible_users[np.random.randint(0, len(eligible_users))]
-    selected_user = eligible_users[0]
-    print(f"Selected user {selected_user} with {user_ratings_count[selected_user]} ratings")
-
-    user_ratings = ratings[ratings['userId'] == selected_user]
-    user_movies = user_ratings.merge(movies, left_on='movieId', right_on='id')
-
-    movie_id_to_index = {movie_id: i for i, movie_id in enumerate(movies['id'])}
-    user_movie_indices = [movie_id_to_index.get(movie_id) for movie_id in user_movies['id'].values]
-    print("Number of ratings: ", len(user_ratings), ", Number of movies: ", len(user_movies))
-
-    # Filter out any None values (movies not in the mapping)
-    user_movie_indices = [idx for idx in user_movie_indices if idx is not None]
-
-    # Extract features using these indices
-    X = tfidf_matrix[user_movie_indices]
-    y = user_movies.loc[user_movies['id'].isin([movies['id'].iloc[idx] for 
-                                                idx in user_movie_indices]), 'rating'].values
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    return selected_user, X_train, X_test, y_train, y_test
-
-
 def round_to_half(x):
     return round(x * 2) / 2
+
+def calculate_actor_average_ratings(df):
+    movies_df = df.copy()
+    actor_ratings = {}
+    order_columns = ['order_0', 'order_1', 'order_2', 'order_3', 'order_4']
+    
+    print("Calculating actor average ratings...")
+    
+    for idx, row in movies_df.iterrows():
+        movie_rating = row['avg_rating']
+        if pd.isna(movie_rating):
+            continue
+            
+        for col in order_columns:
+            actor = row[col]
+            if pd.isna(actor) or actor == '':
+                continue
+            if actor not in actor_ratings:
+                actor_ratings[actor] = {'total_rating': 0, 'movie_count': 0}
+            
+            # Add rating and increment count
+            actor_ratings[actor]['total_rating'] += movie_rating
+            actor_ratings[actor]['movie_count'] += 1
+    
+    actor_avg_ratings = {}
+    for actor, data in actor_ratings.items():
+        actor_avg_ratings[actor] = data['total_rating'] / data['movie_count']
+    
+    all_actor_ratings = list(actor_avg_ratings.values())
+    overall_avg_rating = np.mean(all_actor_ratings) if all_actor_ratings else 0
+    
+    print(f"Total unique actors: {len(actor_avg_ratings)}")
+    print(f"Overall average rating across all actors: {overall_avg_rating:.3f}")
+    
+    print("Substituting actor average ratings in order columns...")
+    
+    for col in order_columns:
+        movies_df[col] = movies_df[col].map(actor_avg_ratings)
+        movies_df[col] = movies_df[col].fillna(overall_avg_rating)
+    
+    print("Substitution completed!")
+    
+    return movies_df, actor_avg_ratings, overall_avg_rating
+
 
 def matrix_factorization(n_factors = 200, n_epochs = 60, lr_all = 0.02, reg_all = 0.02):
     from surprise import Dataset, Reader
@@ -104,62 +110,212 @@ def matrix_factorization(n_factors = 200, n_epochs = 60, lr_all = 0.02, reg_all 
     print("MSE: ", predictions)
     print("Rounded MSE: ",accuracy.mse(rounded_predictions))
 
-    pickle.dump(best_model, open('matrix_fac.pickle', "wb"))
+def word_embed():
+    global ratings
+    global movies
+    tfidf_vectorizer = TfidfVectorizer(min_df=3, max_df=0.95, stop_words='english', max_features=5000)
+    tfidf_matrix = tfidf_vectorizer.fit_transform(movies['soup'])
 
-def linear(a,b):
-    selected_user, X_train, X_test, y_train, y_test = select_user(a,b)
-    lr_model = LinearRegression()
-    lr_model.fit(X_train, y_train)
-    lr_pred_raw = lr_model.predict(X_test)
+    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), 
+                        columns=tfidf_vectorizer.get_feature_names_out(),
+                        index=movies.index)
 
-    lr_pred = np.round(lr_pred_raw * 2) / 2
-    lr_pred = np.clip(lr_pred, 0.5, 5.0)
+    print(f"Tf-idf matrix shape: ", tfidf_matrix.shape)
 
-    lr_mse = mean_squared_error(y_test, lr_pred)
-    lr_mae = mean_absolute_error(y_test, lr_pred)
-    lr_rmse = root_mean_squared_error(y_test, lr_pred)
-    print("User: ", selected_user)
-    print(f"Test RMSE: {lr_rmse:.4f}")
-    print(f"Test MSE: {lr_mse:.4f}")
-    print(f"Test MAE: {lr_mae:.4f}")
+    movie_id_to_index = {movie_id: i for i, movie_id in enumerate(movies['id'])}
+    user_movie_indices = [movie_id_to_index.get(movie_id) for movie_id in user_movies['id'].values]
+    print("Number of ratings: ", len(user_ratings), ", Number of movies: ", len(user_movies))
 
-    with open(os.path.join(model_path, 'linear_model.pkl'), 'wb') as f:
-        pickle.dump(lr_model, f)
+    user_movie_indices = [idx for idx in user_movie_indices if idx is not None]
 
-def ridge(a,b):
-    selected_user, X_train, X_test, y_train, y_test = select_user(a,b)
-    sgd_model = SGDRegressor(penalty='l2', alpha=0.01, random_state=42)
-    sgd_model.fit(X_train, y_train)
+    for i in range(1,5):
+        min_ratings = i * 100
+        max_ratings = min_ratings + 50
 
-    ridge_pred_raw = sgd_model.predict(X_test)
-    ridge_pred = np.round(ridge_pred_raw * 2) / 2
-    ridge_pred = np.clip(ridge_pred, 0.5, 5.0)
+        print(f"\nRating Interval: [{min_ratings}, {max_ratings})")
+        
+        # Select all users within the rating count interval
+        user_counts = ratings['userId'].value_counts()
+        eligible_users = user_counts[(user_counts >= min_ratings) & (user_counts < max_ratings)].index
 
-    ridge_mse = mean_squared_error(y_test, ridge_pred)
-    ridge_mae = mean_absolute_error(y_test, ridge_pred)
-    ridge_rmse = root_mean_squared_error(y_test, ridge_pred)
-    print("User: ", selected_user)
-    print(f"Test RMSE: {ridge_rmse:.4f}")
-    print(f"Test MSE: {ridge_mse:.4f}")
-    print(f"Test MAE: {ridge_mae:.4f}")
+        if len(eligible_users) == 0:
+            print("No users in this rating interval. Skipping...")
+            continue
+
+        lr_mse_list = []
+        lr_mae_list = []
+        ridge_mse_list = []
+        ridge_mae_list = []
+
+        for user_id in eligible_users:
+            user_ratings = ratings[ratings['userId'] == user_id]
+            user_movies = user_ratings.merge(movies, left_on='movieId', right_on='id')
+
+            user_movie_indices = [movie_id_to_index.get(movie_id) for movie_id in user_movies['id'].values]
+            user_movie_indices = [idx for idx in user_movie_indices if idx is not None]
+
+            if len(user_movie_indices) < 5:
+                continue
+
+            X = tfidf_matrix[user_movie_indices]
+            y = user_movies.loc[user_movies['id'].isin(
+                [movies['id'].iloc[idx] for idx in user_movie_indices]), 'rating'].values
+
+            if len(y) < 5:
+                continue
+
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+                # Linear Regression
+                lr_model = LinearRegression()
+                lr_model.fit(X_train, y_train)
+                lr_pred_raw = lr_model.predict(X_test)
+                lr_pred = np.round(lr_pred_raw * 2) / 2
+                lr_pred = np.clip(lr_pred, 0.5, 5.0)
+
+                lr_mse = mean_squared_error(y_test, lr_pred)
+                lr_mae = mean_absolute_error(y_test, lr_pred)
+                lr_mse_list.append(lr_mse)
+                lr_mae_list.append(lr_mae)
+
+                # Ridge (SGDRegressor)
+                sgd_model = SGDRegressor(penalty='l2', alpha=0.01, random_state=42)
+                sgd_model.fit(X_train, y_train)
+                ridge_pred_raw = sgd_model.predict(X_test)
+                ridge_pred = np.round(ridge_pred_raw * 2) / 2
+                ridge_pred = np.clip(ridge_pred, 0.5, 5.0)
+
+                ridge_mse = mean_squared_error(y_test, ridge_pred)
+                ridge_mae = mean_absolute_error(y_test, ridge_pred)
+                ridge_mse_list.append(ridge_mse)
+                ridge_mae_list.append(ridge_mae)
+
+            except Exception as e:
+                continue
+
+        # Report averages for this interval
+        if lr_mse_list:
+            print("Average Model Evaluation:")
+            print(f"Linear Regression - MSE: {np.mean(lr_mse_list):.4f}, MAE: {np.mean(lr_mae_list):.4f}")
+            print(f"Ridge (SGDRegressor) - MSE: {np.mean(ridge_mse_list):.4f}, MAE: {np.mean(ridge_mae_list):.4f}")
+        else:
+            print("Not enough valid users/data to compute average metrics.")
+
+def rating_genres():
+    global movies
+    global ratings
+    modified_df, actor_ratings, overall_avg = calculate_actor_average_ratings(movies)
+    mlb = MultiLabelBinarizer()
+    genres_clean = modified_df['genres'].fillna('').apply(lambda x: x if isinstance(x, list) else [])
+    genres_encoded = mlb.fit_transform(genres_clean)
+    genres_df = pd.DataFrame(genres_encoded, 
+                            columns=[f'{genre}' for genre in mlb.classes_],
+                            index=modified_df.index)
+    modified_df = pd.concat([modified_df, genres_df], axis=1)
     
-    with open(os.path.join(model_path, 'ridge_model.pkl'), 'wb') as f:
-        pickle.dump(sgd_model, f)
+    feature_columns = [
+    'order_0', 'order_1', 'order_2', 'order_3', 'order_4',
+    'avg_rating', 'Action', 'Adventure', 'Animation', 'Comedy', 'Crime',
+    'Documentary', 'Drama', 'Family', 'Fantasy', 'Foreign', 'History',
+    'Horror', 'Music', 'Mystery', 'Romance', 'Science Fiction', 'TV Movie',
+    'Thriller', 'War', 'Western'
+    ]
+
+    movies_features = modified_df[feature_columns].copy()
+    movies_features.fillna(0, inplace=True) 
+
+    scaler = StandardScaler()
+    scaled_movie_features = scaler.fit_transform(movies_features)
+    scaled_movie_features_df = pd.DataFrame(scaled_movie_features, columns=feature_columns, index=movies.index)
+
+
+    print(f"Movie features shape: {scaled_movie_features_df.shape}")
+    movie_id_to_index = {movie_id: i for i, movie_id in enumerate(movies['id'])}
+
+    for i in range(1, 10):
+        min_ratings = i * 50
+        max_ratings = min_ratings + 50
+
+        print(f"\nRating Interval: [{min_ratings}, {max_ratings})")
+
+        # Select all users within the rating count interval
+        user_counts = ratings['userId'].value_counts()
+        eligible_users = user_counts[(user_counts >= min_ratings) & (user_counts < max_ratings)].index
+
+        if len(eligible_users) == 0:
+            print("No users in this rating interval. Skipping...")
+            continue
+
+        lr_mse_list = []
+        lr_mae_list = []
+        ridge_mse_list = []
+        ridge_mae_list = []
+
+        for user_id in eligible_users:
+            user_ratings = ratings[ratings['userId'] == user_id]
+            user_movies = user_ratings.merge(movies, left_on='movieId', right_on='id')
+
+            user_movie_indices = [movie_id_to_index.get(movie_id) for movie_id in user_movies['id'].values]
+            user_movie_indices = [idx for idx in user_movie_indices if idx is not None]
+
+            if len(user_movie_indices) < 5: # Need at least 5 data points for train/test split
+                continue
+
+            X = scaled_movie_features_df.iloc[user_movie_indices].values
+            y = user_movies.loc[user_movies['id'].isin(
+                [movies['id'].iloc[idx] for idx in user_movie_indices]), 'rating'].values
+
+            if len(y) < 5: 
+                continue
+
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+                # Linear Regression
+                lr_model = LinearRegression()
+                lr_model.fit(X_train, y_train)
+                lr_pred_raw = lr_model.predict(X_test)
+                lr_pred = np.round(lr_pred_raw * 2) / 2
+                lr_pred = np.clip(lr_pred, 0.5, 5.0)
+
+                lr_mse = mean_squared_error(y_test, lr_pred)
+                lr_mae = mean_absolute_error(y_test, lr_pred)
+                lr_mse_list.append(lr_mse)
+                lr_mae_list.append(lr_mae)
+
+                # Ridge (SGDRegressor)
+                sgd_model = SGDRegressor(penalty='l2', alpha=0.01, random_state=42, max_iter=1000) # Added max_iter
+                sgd_model.fit(X_train, y_train)
+                ridge_pred_raw = sgd_model.predict(X_test)
+                ridge_pred = np.round(ridge_pred_raw * 2) / 2
+                ridge_pred = np.clip(ridge_pred, 0.5, 5.0)
+
+                ridge_mse = mean_squared_error(y_test, ridge_pred)
+                ridge_mae = mean_absolute_error(y_test, ridge_pred)
+                ridge_mse_list.append(ridge_mse)
+                ridge_mae_list.append(ridge_mae)
+
+            except Exception as e:
+                continue
+        if lr_mse_list:
+            print("Average Model Evaluation:")
+            print(f"Linear Regression - MSE: {np.mean(lr_mse_list):.4f}, MAE: {np.mean(lr_mae_list):.4f}")
+            print(f"Ridge (SGDRegressor) - MSE: {np.mean(ridge_mse_list):.4f}, MAE: {np.mean(ridge_mae_list):.4f}")
+        else:
+            print("Not enough valid users/data to compute average metrics.")
 
 def main(model_name, a = 0, b = 0, n_factors = 200, n_epochs = 10, lr_all = 0.005, reg_all = 0.02):
     if model_name == 'matrix':
         matrix_factorization(n_factors = n_factors, n_epochs = n_epochs, lr_all = lr_all, reg_all = reg_all)
-    elif model_name == 'linear':
-        linear(a,b)
-    elif model_name == 'ridge':
-        ridge(a,b)
+    elif model_name == 'word_embed':
+        word_embed()
+    elif model_name == 'rating_genres':
+        rating_genres()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run a specified model with appropriate parameters.')
-    parser.add_argument('model_name', type=str, help="Model to run: 'matrix', 'linear', or 'ridge'")
-
-    parser.add_argument('--a', type=int, help="Parameter a (used in linear and ridge)")
-    parser.add_argument('--b', type=int, help="Parameter b (used in linear and ridge)")
+    parser.add_argument('model_name', type=str, help="Model to run: 'matrix', 'rating_genres', or 'word_embed'")
 
     parser.add_argument('--n_factors', type=int, default=200, help="Number of latent factors for matrix_factorization")
     parser.add_argument('--n_epochs', type=int, default=10, help="Number of epochs for matrix_factorization")
@@ -170,8 +326,6 @@ if __name__ == '__main__':
 
     main(
         model_name=args.model_name,
-        a=args.a,
-        b=args.b,
         n_factors=args.n_factors,
         n_epochs=args.n_epochs,
         lr_all=args.lr_all,
