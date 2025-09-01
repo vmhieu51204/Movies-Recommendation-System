@@ -110,7 +110,7 @@ def main(path):
     ratings['movieId'] = ratings['movieId'].map(item_mapping)
     movies['id'] = movies['id'].map(item_mapping)
 
-    ratings.drop(columns=['timestamp'], inplace=True)
+    ratings = ratings.drop(columns=['timestamp'])
     ratings.to_csv(os.path.join(path, 'p_ratings.csv'))
     movies.to_csv(os.path.join(path, 'p_movies.csv'))
 

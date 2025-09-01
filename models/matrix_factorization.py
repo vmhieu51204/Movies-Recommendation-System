@@ -8,6 +8,12 @@ from sklearn.model_selection import KFold
 
 ratings, movies = load_data()
 
+percentile = 0.05
+user_rating_counts = ratings['userId'].value_counts()
+num_top_users = int(np.ceil(len(user_rating_counts) * percentile))
+top_users = user_rating_counts.nlargest(num_top_users).index.tolist()
+ratings = ratings[ratings['userId'].isin(top_users)]
+
 reader = Reader(rating_scale=(0.5, 5))
 data = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], reader)
 
@@ -46,4 +52,4 @@ rounded_predictions = [
     pred._replace(est=np.clip(round_to_half(pred.est), 0.5, 5.0))
     for pred in predictions
 ]
-accuracy.mse(rounded_predictions)
+print(accuracy.mse(rounded_predictions))
